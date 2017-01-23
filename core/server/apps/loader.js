@@ -1,16 +1,26 @@
 
 var path = require('path'),
     _    = require('lodash'),
-    when = require('when'),
-    appProxy = require('./proxy'),
+    Promise = require('bluebird'),
+    AppProxy = require('./proxy'),
     config = require('../config'),
     AppSandbox = require('./sandbox'),
     AppDependencies = require('./dependencies'),
+    AppPermissions = require('./permissions'),
+    i18n = require('../i18n'),
     loader;
+
+function isInternalApp(name) {
+    return _.includes(config.get('internalApps'), name);
+}
 
 // Get the full path to an app by name
 function getAppAbsolutePath(name) {
-    return path.join(config().paths.appPath, name);
+    if (isInternalApp(name)) {
+        return path.join(config.get('paths').internalAppPath, name);
+    }
+
+    return path.join(config.getContentPath('apps'), name);
 }
 
 // Get a relative path to the given apps root, defaults
@@ -18,19 +28,30 @@ function getAppAbsolutePath(name) {
 function getAppRelativePath(name, relativeTo) {
     relativeTo = relativeTo || __dirname;
 
-    return path.relative(relativeTo, getAppAbsolutePath(name));
+    var relativePath = path.relative(relativeTo, getAppAbsolutePath(name));
+
+    if (relativePath.charAt(0) !== '.') {
+        relativePath = './' + relativePath;
+    }
+
+    return relativePath;
 }
 
-// Load apps through a psuedo sandbox
-function loadApp(appPath) {
-    var sandbox = new AppSandbox();
+// Load apps through a pseudo sandbox
+function loadApp(appPath, isInternal) {
+    var sandbox = new AppSandbox({internal: isInternal});
 
     return sandbox.loadApp(appPath);
 }
 
-function getAppByName(name) {
+function getAppByName(name, permissions) {
     // Grab the app class to instantiate
-    var AppClass = loadApp(getAppRelativePath(name)),
+    var AppClass = loadApp(getAppRelativePath(name), isInternalApp(name)),
+        appProxy = new AppProxy({
+            name: name,
+            permissions: permissions,
+            internal: isInternalApp(name)
+        }),
         app;
 
     // Check for an actual class, otherwise just use whatever was returned
@@ -40,45 +61,64 @@ function getAppByName(name) {
         app = AppClass;
     }
 
-    return app;
+    return {
+        app: app,
+        proxy: appProxy
+    };
 }
 
 // The loader is responsible for loading apps
 loader = {
     // Load a app and return the instantiated app
     installAppByName: function (name) {
-        // Install the apps dependendencies first
-        var deps = new AppDependencies(getAppAbsolutePath(name));
-        return deps.install().then(function () {
-            var app = getAppByName(name);
+        // Install the apps dependencies first
+        var appPath = getAppAbsolutePath(name),
+            deps = new AppDependencies(appPath);
 
-            // Check for an install() method on the app.
-            if (!_.isFunction(app.install)) {
-                return when.reject(new Error("Error loading app named " + name + "; no install() method defined."));
-            }
+        return deps.install()
+            .then(function () {
+                // Load app permissions
+                var perms = new AppPermissions(appPath);
 
-            // Run the app.install() method
-            // Wrapping the install() with a when because it's possible
-            // to not return a promise from it.
-            return when(app.install(appProxy)).then(function () {
-                return when.resolve(app);
+                return perms.read().catch(function (err) {
+                    // Provide a helpful error about which app
+                    return Promise.reject(new Error(i18n.t('errors.apps.permissionsErrorLoadingApp.error', {name: name, message: err.message})));
+                });
+            })
+            .then(function (appPerms) {
+                var appInfo = getAppByName(name, appPerms),
+                    app = appInfo.app,
+                    appProxy = appInfo.proxy;
+
+                // Check for an install() method on the app.
+                if (!_.isFunction(app.install)) {
+                    return Promise.reject(new Error(i18n.t('errors.apps.noInstallMethodLoadingApp.error', {name: name})));
+                }
+
+                // Run the app.install() method
+                // Wrapping the install() with a when because it's possible
+                // to not return a promise from it.
+                return Promise.resolve(app.install(appProxy)).return(app);
             });
-        });
     },
 
     // Activate a app and return it
     activateAppByName: function (name) {
-        var app = getAppByName(name);
+        var perms = new AppPermissions(getAppAbsolutePath(name));
 
-        // Check for an activate() method on the app.
-        if (!_.isFunction(app.activate)) {
-            return when.reject(new Error("Error loading app named " + name + "; no activate() method defined."));
-        }
+        return perms.read().then(function (appPerms) {
+            var appInfo = getAppByName(name, appPerms),
+                app = appInfo.app,
+                appProxy = appInfo.proxy;
 
-        // Wrapping the activate() with a when because it's possible
-        // to not return a promise from it.
-        return when(app.activate(appProxy)).then(function () {
-            return when.resolve(app);
+            // Check for an activate() method on the app.
+            if (!_.isFunction(app.activate)) {
+                return Promise.reject(new Error(i18n.t('errors.apps.noActivateMethodLoadingApp.error', {name: name})));
+            }
+
+            // Wrapping the activate() with a when because it's possible
+            // to not return a promise from it.
+            return Promise.resolve(app.activate(appProxy)).return(app);
         });
     }
 };

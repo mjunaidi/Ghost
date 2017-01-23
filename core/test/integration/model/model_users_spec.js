@@ -1,105 +1,158 @@
-/*globals describe, before, beforeEach, afterEach, it*/
-var testUtils = require('../../utils'),
-    should = require('should'),
-    when = require('when'),
-    _ = require('lodash'),
-    errors = require('../../../server/errorHandling'),
-    sinon = require('sinon'),
-    uuid = require('node-uuid'),
+var testUtils   = require('../../utils'),
+    should      = require('should'),
+    Promise     = require('bluebird'),
+    sinon       = require('sinon'),
+    _           = require('lodash'),
 
     // Stuff we are testing
-    Models = require('../../../server/models');
-
+    errors      = require('../../../server/errors'),
+    gravatar    = require('../../../server/utils/gravatar'),
+    UserModel   = require('../../../server/models/user').User,
+    RoleModel   = require('../../../server/models/role').Role,
+    models      = require('../../../server/models'),
+    events      = require('../../../server/events'),
+    context     = testUtils.context.admin,
+    sandbox     = sinon.sandbox.create();
 
 describe('User Model', function run() {
-    var UserModel = Models.User;
-
-    before(function (done) {
-        testUtils.clearData().then(function () {
-            done();
-        }, done);
+    var eventSpy;
+    // Keep the DB clean
+    before(testUtils.teardown);
+    afterEach(testUtils.teardown);
+    afterEach(function () {
+        sandbox.restore();
     });
 
-    afterEach(function (done) {
-        testUtils.clearData().then(function () {
-            done();
-        }, done);
+    before(function () {
+        should.exist(UserModel);
+    });
+
+    beforeEach(function () {
+        eventSpy = sandbox.spy(events, 'emit');
+
+        /**
+         * @TODO:
+         * - key: migrations-kate
+         * - this is not pretty
+         * - eventSpy get's now more events then expected
+         * - because on migrations.populate we trigger populateDefaults
+         * - how to solve? eventSpy must be local and not global?
+         */
+        models.init();
+        sandbox.stub(models.Settings, 'populateDefaults').returns(Promise.resolve());
     });
 
     describe('Registration', function runRegistration() {
-        beforeEach(function (done) {
-            testUtils.initData().then(function () {
-                done();
-            }, done);
-        });
+        beforeEach(testUtils.setup('roles'));
 
         it('can add first', function (done) {
-            var userData = testUtils.DataGenerator.forModel.users[0],
-                gravatarStub =  sinon.stub(UserModel, 'gravatarLookup', function (userData) {
-                    return when.resolve(userData);
-                });
+            var userData = testUtils.DataGenerator.forModel.users[0];
 
-            UserModel.add(userData).then(function (createdUser) {
+            UserModel.add(userData, context).then(function (createdUser) {
                 should.exist(createdUser);
-                createdUser.has('uuid').should.equal(true);
-                createdUser.attributes.password.should.not.equal(userData.password, "password was hashed");
-                createdUser.attributes.email.should.eql(userData.email, "email address correct");
-                gravatarStub.restore();
+                createdUser.attributes.password.should.not.equal(userData.password, 'password was hashed');
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
+
                 done();
-            }).then(null, done);
+            }).catch(done);
+        });
+
+        it('shortens slug if possible', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[2];
+
+            UserModel.add(userData, context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.has('slug').should.equal(true);
+                createdUser.attributes.slug.should.equal('jimothy');
+                done();
+            }).catch(done);
+        });
+
+        it('does not short slug if not possible', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[2];
+
+            UserModel.add(userData, context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.has('slug').should.equal(true);
+                createdUser.attributes.slug.should.equal('jimothy');
+            }).then(function () {
+                userData.email = 'newmail@mail.com';
+                UserModel.add(userData, context).then(function (createdUser) {
+                    should.exist(createdUser);
+                    createdUser.has('slug').should.equal(true);
+                    createdUser.attributes.slug.should.equal('jimothy-bogendath');
+                }).then(function () {
+                    userData.email = 'newmail2@mail.com';
+                    UserModel.add(userData, context).then(function (createdUser) {
+                        should.exist(createdUser);
+                        createdUser.has('slug').should.equal(true);
+                        createdUser.attributes.slug.should.equal('jimothy-bogendath-2');
+                        done();
+                    });
+                });
+            }).catch(done);
         });
 
         it('does NOT lowercase email', function (done) {
-            var userData = testUtils.DataGenerator.forModel.users[2],
-                gravatarStub =  sinon.stub(UserModel, 'gravatarLookup', function (userData) {
-                    return when.resolve(userData);
-                });
+            var userData = testUtils.DataGenerator.forModel.users[2];
 
-            UserModel.add(userData).then(function (createdUser) {
+            UserModel.add(userData, context).then(function (createdUser) {
                 should.exist(createdUser);
-                createdUser.has('uuid').should.equal(true);
-                createdUser.attributes.email.should.eql(userData.email, "email address correct");
-                gravatarStub.restore();
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
 
         it('can find gravatar', function (done) {
-            var userData = testUtils.DataGenerator.forModel.users[4],
-                gravatarStub = sinon.stub(UserModel, 'gravatarLookup', function (userData) {
-                    userData.image = 'http://www.gravatar.com/avatar/2fab21a4c4ed88e76add10650c73bae1?d=404'
-                    return when.resolve(userData);
-                });
+            var userData = testUtils.DataGenerator.forModel.users[4];
 
-            UserModel.add(userData).then(function (createdUser) {
+            sandbox.stub(gravatar, 'lookup', function (userData) {
+                userData.image = 'http://www.gravatar.com/avatar/2fab21a4c4ed88e76add10650c73bae1?d=404';
+                return Promise.resolve(userData);
+            });
+
+            UserModel.add(userData, context).then(function (createdUser) {
                 should.exist(createdUser);
-                createdUser.has('uuid').should.equal(true);
-                createdUser.attributes.image.should.eql('http://www.gravatar.com/avatar/2fab21a4c4ed88e76add10650c73bae1?d=404', 'Gravatar found');
-                gravatarStub.restore();
+                createdUser.attributes.image.should.eql(
+                    'http://www.gravatar.com/avatar/2fab21a4c4ed88e76add10650c73bae1?d=404', 'Gravatar found'
+                );
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
 
         it('can handle no gravatar', function (done) {
-            var userData = testUtils.DataGenerator.forModel.users[0],
-                gravatarStub = sinon.stub(UserModel, 'gravatarLookup', function (userData) {
-                    return when.resolve(userData);
-                });
+            var userData = testUtils.DataGenerator.forModel.users[0];
 
-            UserModel.add(userData).then(function (createdUser) {
+            sandbox.stub(gravatar, 'lookup', function (userData) {
+                return Promise.resolve(userData);
+            });
+
+            UserModel.add(userData, context).then(function (createdUser) {
                 should.exist(createdUser);
-                createdUser.has('uuid').should.equal(true);
                 should.not.exist(createdUser.image);
-                gravatarStub.restore();
                 done();
-            }).then(null, done);
+            }).catch(done);
+        });
+
+        it('can set password of only numbers', function () {
+            var userData = testUtils.DataGenerator.forModel.users[0];
+
+            // avoid side-effects!
+            userData = _.cloneDeep(userData);
+            userData.password = 12345678;
+
+            // mocha supports promises
+            return UserModel.add(userData, context).then(function (createdUser) {
+                should.exist(createdUser);
+                // cannot validate password
+            });
         });
 
         it('can find by email and is case insensitive', function (done) {
             var userData = testUtils.DataGenerator.forModel.users[2],
                 email = testUtils.DataGenerator.forModel.users[2].email;
 
-            UserModel.add(userData).then(function () {
+            UserModel.add(userData, context).then(function () {
                 // Test same case
                 return UserModel.getByEmail(email).then(function (user) {
                     should.exist(user);
@@ -125,276 +178,447 @@ describe('User Model', function run() {
                 });
             }).then(function () {
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
     });
 
     describe('Basic Operations', function () {
-
-        beforeEach(function (done) {
-            testUtils.initData()
-                .then(function () {
-                    return when(testUtils.insertDefaultUser());
-                })
-                .then(function () {
-                    done();
-                }, done);
-        });
+        beforeEach(testUtils.setup('users:roles'));
 
         it('sets last login time on successful login', function (done) {
             var userData = testUtils.DataGenerator.forModel.users[0];
 
-            UserModel.check({email: userData.email, pw:userData.password}).then(function (activeUser) {
+            UserModel.check({email: userData.email, password: userData.password}).then(function (activeUser) {
                 should.exist(activeUser.get('last_login'));
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
 
-        it('can\'t add second', function (done) {
-            var userData = testUtils.DataGenerator.forModel.users[1];
+        it('converts fetched dateTime fields to Date objects', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[0];
 
-            return UserModel.add(userData).then(done, function (failure) {
-                failure.message.should.eql('A user is already registered. Only one user for now!');
+            UserModel.check({email: userData.email, password: userData.password}).then(function (user) {
+                return UserModel.findOne({id: user.id});
+            }).then(function (user) {
+                var lastLogin,
+                    createdAt,
+                    updatedAt;
+
+                should.exist(user);
+
+                lastLogin = user.get('last_login');
+                createdAt = user.get('created_at');
+                updatedAt = user.get('updated_at');
+
+                lastLogin.should.be.an.instanceof(Date);
+                createdAt.should.be.an.instanceof(Date);
+                updatedAt.should.be.an.instanceof(Date);
+
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
 
-        it('can browse', function (done) {
+        it('can findAll', function (done) {
+            UserModel.findAll().then(function (results) {
+                should.exist(results);
+                results.length.should.equal(4);
 
-            UserModel.browse().then(function (results) {
+                done();
+            }).catch(done);
+        });
+
+        it('can findPage (default)', function (done) {
+            UserModel.findPage().then(function (results) {
                 should.exist(results);
 
-                results.length.should.be.above(0);
+                results.meta.pagination.page.should.equal(1);
+                results.meta.pagination.limit.should.equal(15);
+                results.meta.pagination.pages.should.equal(1);
+                results.users.length.should.equal(4);
 
                 done();
-
-            }).then(null, done);
+            }).catch(done);
         });
 
-        it('can read', function (done) {
+        /**
+         * Removed in favour of filters, but this relation hasn't been re-added yet
+         */
+        it.skip('can findPage by role', function (done) {
+            return testUtils.fixtures.createExtraUsers().then(function () {
+                return UserModel.findPage({role: 'Administrator'});
+            }).then(function (results) {
+                results.meta.pagination.page.should.equal(1);
+                results.meta.pagination.limit.should.equal(15);
+                results.meta.pagination.pages.should.equal(1);
+                results.meta.pagination.total.should.equal(2);
+                results.users.length.should.equal(2);
+
+                return UserModel.findPage({role: 'Owner'});
+            }).then(function (results) {
+                results.meta.pagination.page.should.equal(1);
+                results.meta.pagination.limit.should.equal(15);
+                results.meta.pagination.pages.should.equal(1);
+                results.meta.pagination.total.should.equal(1);
+                results.users.length.should.equal(1);
+
+                return UserModel.findPage({role: 'Editor', limit: 1});
+            }).then(function (results) {
+                results.meta.pagination.page.should.equal(1);
+                results.meta.pagination.limit.should.equal(1);
+                results.meta.pagination.pages.should.equal(2);
+                results.meta.pagination.total.should.equal(2);
+                results.users.length.should.equal(1);
+
+                done();
+            }).catch(done);
+        });
+
+        it('can findPage with limit all', function () {
+            return testUtils.fixtures.createExtraUsers().then(function () {
+                return UserModel.findPage({limit: 'all'});
+            }).then(function (results) {
+                results.meta.pagination.page.should.equal(1);
+                results.meta.pagination.limit.should.equal('all');
+                results.meta.pagination.pages.should.equal(1);
+                results.users.length.should.equal(7);
+            });
+        });
+
+        it('can NOT findPage for a page that overflows the datatype', function (done) {
+            UserModel.findPage({page: 5700000000055345439587894375457849375284932759842375894372589243758947325894375894275894275894725897432859724309})
+                .then(function (paginationResult) {
+                    should.exist(paginationResult.meta);
+
+                    paginationResult.meta.pagination.page.should.be.a.Number();
+
+                    done();
+                }).catch(done);
+        });
+
+        it('can findOne', function (done) {
             var firstUser;
 
-            UserModel.browse().then(function (results) {
-
+            UserModel.findAll().then(function (results) {
                 should.exist(results);
-
                 results.length.should.be.above(0);
-
                 firstUser = results.models[0];
 
-                return UserModel.read({email: firstUser.attributes.email});
-
+                return UserModel.findOne({email: firstUser.attributes.email});
             }).then(function (found) {
-
                 should.exist(found);
-
                 found.attributes.name.should.equal(firstUser.attributes.name);
 
                 done();
-
-            }).then(null, done);
-
+            }).catch(done);
         });
 
-        it('can edit', function (done) {
-            var firstUser;
+        it('can findOne by role name', function () {
+            return testUtils.fixtures.createExtraUsers().then(function () {
+                return Promise.join(UserModel.findOne({role: 'Owner'}), UserModel.findOne({role: 'Editor'}));
+            }).then(function (results) {
+                var owner = results[0],
+                    editor = results[1];
 
-            UserModel.browse().then(function (results) {
+                should.exist(owner);
+                should.exist(editor);
 
-                should.exist(results);
+                owner = owner.toJSON();
+                editor = editor.toJSON();
 
-                results.length.should.be.above(0);
+                should.exist(owner.roles);
+                should.exist(editor.roles);
 
-                firstUser = results.models[0];
+                owner.roles[0].name.should.equal('Owner');
+                editor.roles[0].name.should.equal('Editor');
+            });
+        });
 
-                return UserModel.edit({id: firstUser.id, website: "some.newurl.com"});
+        it('can invite user', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[4];
 
-            }).then(function (edited) {
+            UserModel.add(_.extend({}, userData, {status: 'invited'}), context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.attributes.password.should.not.equal(userData.password, 'password was hashed');
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
 
-                should.exist(edited);
-
-                edited.attributes.website.should.equal('some.newurl.com');
+                eventSpy.calledOnce.should.be.true();
+                eventSpy.firstCall.calledWith('user.added').should.be.true();
 
                 done();
-
-            }).then(null, done);
+            }).catch(done);
         });
 
-        it("can get effective permissions", function (done) {
-            UserModel.effectivePermissions(1).then(function (effectivePermissions) {
-                should.exist(effectivePermissions);
+        it('can add active user', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[4];
 
-                effectivePermissions.length.should.be.above(0);
+            RoleModel.findOne().then(function (role) {
+                userData.roles = [role.toJSON()];
+
+                return UserModel.add(userData, _.extend({}, context, {include: ['roles']}));
+            }).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.get('password').should.not.equal(userData.password, 'password was hashed');
+                createdUser.get('email').should.eql(userData.email, 'email address correct');
+                createdUser.related('roles').toJSON()[0].name.should.eql('Administrator', 'role set correctly');
+
+                eventSpy.calledTwice.should.be.true();
+                eventSpy.firstCall.calledWith('user.added').should.be.true();
+                eventSpy.secondCall.calledWith('user.activated').should.be.true();
 
                 done();
-            }).then(null, done);
+            }).catch(done);
         });
 
-        it('can delete', function (done) {
-            var firstUserId;
+        it('can NOT add active user with invalid email address', function (done) {
+            var userData = _.clone(testUtils.DataGenerator.forModel.users[4]);
 
-            UserModel.browse().then(function (results) {
+            userData.email = 'invalidemailaddress';
 
-                should.exist(results);
+            RoleModel.findOne().then(function (role) {
+                userData.roles = [role.toJSON()];
 
-                results.length.should.be.above(0);
-
-                firstUserId = results.models[0].id;
-
-                return UserModel.destroy(firstUserId);
-
+                return UserModel.add(userData, _.extend({}, context, {include: ['roles']}));
             }).then(function () {
-
-                return UserModel.browse();
-
-            }).then(function (newResults) {
-                var ids, hasDeletedId;
-
-                if (newResults.length < 1) {
-                    // Bug out if we only had one user and deleted it.
-                    return done();
-                }
-
-                ids = _.pluck(newResults.models, "id");
-                hasDeletedId = _.any(ids, function (id) {
-                    return id === firstUserId;
-                });
-
-                hasDeletedId.should.equal(false);
-                done();
-
-            }).then(null, done);
-        });
-
-        it('can generate reset token', function (done) {
-            // Expires in one minute
-            var expires = Date.now() + 60000,
-                dbHash = uuid.v4();
-
-            UserModel.browse().then(function (results) {
-
-                return UserModel.generateResetToken(results.models[0].attributes.email, expires, dbHash);
-
-            }).then(function (token) {
-                should.exist(token);
-
-                token.length.should.be.above(0);
-
-                done();
-            }).then(null, done);
-        });
-
-        it('can validate a reset token', function (done) {
-            // Expires in one minute
-            var expires = Date.now() + 60000,
-                dbHash = uuid.v4();
-
-            UserModel.browse().then(function (results) {
-
-                return UserModel.generateResetToken(results.models[0].attributes.email, expires, dbHash);
-
-            }).then(function (token) {
-
-                return UserModel.validateToken(token, dbHash);
-
-            }).then(function () {
-
-                done();
-
-            }).then(null, done);
-        });
-
-        it('can reset a password with a valid token', function (done) {
-            // Expires in one minute
-            var origPassword,
-                expires = Date.now() + 60000,
-                dbHash = uuid.v4();
-
-            UserModel.browse().then(function (results) {
-
-                var firstUser = results.models[0],
-                    origPassword = firstUser.attributes.password;
-
-                should.exist(origPassword);
-
-                return UserModel.generateResetToken(firstUser.attributes.email, expires, dbHash);
-
-            }).then(function (token) {
-
-                return UserModel.resetPassword(token, 'newpassword', 'newpassword', dbHash);
-
-            }).then(function (resetUser) {
-                var resetPassword = resetUser.get('password');
-
-                should.exist(resetPassword);
-
-                resetPassword.should.not.equal(origPassword);
-
-                done();
-            }).then(null, done);
-        });
-
-        it('doesn\'t allow expired timestamp tokens', function (done) {
-            var email,
-                // Expired one minute ago
-                expires = Date.now() - 60000,
-                dbHash = uuid.v4();
-
-            UserModel.browse().then(function (results) {
-
-                // Store email for later
-                email = results.models[0].attributes.email;
-
-                return UserModel.generateResetToken(email, expires, dbHash);
-
-            }).then(function (token) {
-                return UserModel.validateToken(token, dbHash);
-            }).then(function () {
-                throw new Error("Allowed expired token");
-            }, function (err) {
-
-                should.exist(err);
-
-                err.message.should.equal("Expired token");
-
+                done(new Error('User was created with an invalid email address'));
+            }).catch(function () {
                 done();
             });
         });
 
-        it('doesn\'t allow tampered timestamp tokens', function (done) {
-            // Expired one minute ago
-            var expires = Date.now() - 60000,
-                dbHash = uuid.v4();
+        it('can edit active user', function (done) {
+            var firstUser = testUtils.DataGenerator.Content.users[0].id;
 
-            UserModel.browse().then(function (results) {
+            UserModel.findOne({id: firstUser}).then(function (results) {
+                var user;
+                should.exist(results);
+                user = results.toJSON();
+                user.id.should.equal(firstUser);
+                should.equal(user.website, null);
 
-                return UserModel.generateResetToken(results.models[0].attributes.email, expires, dbHash);
+                return UserModel.edit({website: 'http://some.newurl.com'}, {id: firstUser});
+            }).then(function (edited) {
+                should.exist(edited);
+                edited.attributes.website.should.equal('http://some.newurl.com');
 
-            }).then(function (token) {
-
-                var tokenText = new Buffer(token, 'base64').toString('ascii'),
-                    parts = tokenText.split('|'),
-                    fakeExpires,
-                    fakeToken;
-
-                fakeExpires = Date.now() + 60000;
-
-                fakeToken = [String(fakeExpires), parts[1], parts[2]].join('|');
-                fakeToken = new Buffer(fakeToken).toString('base64');
-
-                return UserModel.validateToken(fakeToken, dbHash);
-
-            }).then(function () {
-                throw new Error("allowed invalid token");
-            }, function (err) {
-
-                should.exist(err);
-
-                err.message.should.equal("Invalid token");
+                eventSpy.calledTwice.should.be.true();
+                eventSpy.firstCall.calledWith('user.activated.edited').should.be.true();
+                eventSpy.secondCall.calledWith('user.edited').should.be.true();
 
                 done();
+            }).catch(done);
+        });
+
+        it('can NOT set an invalid email address', function (done) {
+            var firstUser = testUtils.DataGenerator.Content.users[0].id;
+
+            UserModel.findOne({id: firstUser}).then(function (user) {
+                return user.edit({email: 'notanemailaddress'});
+            }).then(function () {
+                done(new Error('Invalid email address was accepted'));
+            }).catch(function () {
+                done();
+            });
+        });
+
+        it('can edit invited user', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[4],
+                userId;
+
+            UserModel.add(_.extend({}, userData, {status: 'invited'}), context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.attributes.password.should.not.equal(userData.password, 'password was hashed');
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
+                createdUser.attributes.status.should.equal('invited');
+
+                userId = createdUser.attributes.id;
+
+                eventSpy.calledOnce.should.be.true();
+                eventSpy.firstCall.calledWith('user.added').should.be.true();
+
+                return UserModel.edit({website: 'http://some.newurl.com'}, {id: userId});
+            }).then(function (createdUser) {
+                createdUser.attributes.status.should.equal('invited');
+
+                eventSpy.calledTwice.should.be.true();
+                eventSpy.secondCall.calledWith('user.edited').should.be.true();
+                done();
+            }).catch(done);
+        });
+
+        it('can activate invited user', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[4],
+                userId;
+
+            UserModel.add(_.extend({}, userData, {status: 'invited'}), context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.attributes.password.should.not.equal(userData.password, 'password was hashed');
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
+                createdUser.attributes.status.should.equal('invited');
+
+                userId = createdUser.attributes.id;
+
+                eventSpy.calledOnce.should.be.true();
+                eventSpy.firstCall.calledWith('user.added').should.be.true();
+
+                return UserModel.edit({status: 'active'}, {id: userId});
+            }).then(function (createdUser) {
+                createdUser.attributes.status.should.equal('active');
+
+                eventSpy.calledThrice.should.be.true();
+                eventSpy.secondCall.calledWith('user.activated').should.be.true();
+                eventSpy.thirdCall.calledWith('user.edited').should.be.true();
+                done();
+            }).catch(done);
+        });
+
+        it('can destroy active user', function (done) {
+            var firstUser = {id: testUtils.DataGenerator.Content.users[0].id};
+
+            // Test that we have the user we expect
+            UserModel.findOne(firstUser).then(function (results) {
+                var user;
+                should.exist(results);
+                user = results.toJSON();
+                user.id.should.equal(firstUser.id);
+
+                // Destroy the user
+                return UserModel.destroy(firstUser);
+            }).then(function (response) {
+                response.toJSON().should.be.empty();
+
+                eventSpy.calledTwice.should.be.true();
+                eventSpy.firstCall.calledWith('user.deactivated').should.be.true();
+                eventSpy.secondCall.calledWith('user.deleted').should.be.true();
+
+                // Double check we can't find the user again
+                return UserModel.findOne(firstUser);
+            }).then(function (newResults) {
+                should.equal(newResults, null);
+
+                done();
+            }).catch(done);
+        });
+
+        it('can destroy invited user', function (done) {
+            var userData = testUtils.DataGenerator.forModel.users[4],
+                userId;
+
+            UserModel.add(_.extend({}, userData, {status: 'invited'}), context).then(function (createdUser) {
+                should.exist(createdUser);
+                createdUser.attributes.password.should.not.equal(userData.password, 'password was hashed');
+                createdUser.attributes.email.should.eql(userData.email, 'email address correct');
+                createdUser.attributes.status.should.equal('invited');
+
+                userId = {id: createdUser.attributes.id};
+
+                eventSpy.calledOnce.should.be.true();
+                eventSpy.firstCall.calledWith('user.added').should.be.true();
+
+                // Destroy the user
+                return UserModel.destroy(userId);
+            }).then(function (response) {
+                response.toJSON().should.be.empty();
+
+                eventSpy.calledTwice.should.be.true();
+                eventSpy.secondCall.calledWith('user.deleted').should.be.true();
+
+                // Double check we can't find the user again
+                return UserModel.findOne(userId);
+            }).then(function (newResults) {
+                should.equal(newResults, null);
+
+                done();
+            }).catch(done);
+        });
+    });
+
+    describe('Password change', function () {
+        beforeEach(testUtils.setup('users:roles'));
+
+        describe('error', function () {
+            it('wrong old password', function (done) {
+                UserModel.changePassword({
+                    newPassword: '12345678',
+                    ne2Password: '12345678',
+                    oldPassword: '123456789',
+                    user_id: testUtils.DataGenerator.Content.users[0].id
+                }, testUtils.context.owner).then(function () {
+                    done(new Error('expected error!'));
+                }).catch(function (err) {
+                    (err instanceof errors.ValidationError).should.eql(true);
+                    done();
+                });
+            });
+
+            it('wrong old password', function (done) {
+                UserModel.changePassword({
+                    newPassword: '12345678',
+                    ne2Password: '12345678',
+                    oldPassword: '123456789',
+                    user_id: testUtils.DataGenerator.Content.users[0].id
+                }, testUtils.context.owner).then(function () {
+                    done(new Error('expected error!'));
+                }).catch(function (err) {
+                    (err instanceof errors.ValidationError).should.eql(true);
+                    done();
+                });
+            });
+        });
+
+        describe('success', function () {
+            it('can change password', function (done) {
+                UserModel.changePassword({
+                    newPassword: '12345678',
+                    ne2Password: '12345678',
+                    oldPassword: 'Sl1m3rson',
+                    user_id: testUtils.DataGenerator.Content.users[0].id
+                }, testUtils.context.owner).then(function (user) {
+                    user.get('password').should.not.eql('12345678');
+                    done();
+                }).catch(done);
             });
         });
     });
 
+    describe('User setup', function () {
+        beforeEach(testUtils.setup('owner'));
+
+        it('setup user', function (done) {
+            var userData = {
+                name: 'Max Mustermann',
+                email: 'test@ghost.org',
+                password: '12345678'
+            };
+
+            UserModel.setup(userData, {id: 1})
+                .then(function (user) {
+                    user.get('name').should.eql(userData.name);
+                    user.get('email').should.eql(userData.email);
+                    user.get('slug').should.eql('max');
+
+                    // naive check that password was hashed
+                    user.get('password').should.not.eql(userData.password);
+                    done();
+                })
+                .catch(done);
+        });
+    });
+
+    describe('User Login', function () {
+        beforeEach(testUtils.setup('owner'));
+
+        it('gets the correct validations when entering an invalid password', function () {
+            var object = {email: 'jbloggs@example.com', password: 'wrong'};
+
+            function userWasLoggedIn() {
+                throw new Error('User should not have been logged in.');
+            }
+
+            return UserModel.check(object).then(userWasLoggedIn)
+                .catch(function checkError(error) {
+                    should.exist(error);
+                    error.errorType.should.equal('UnauthorizedError');
+                });
+        });
+    });
 });
